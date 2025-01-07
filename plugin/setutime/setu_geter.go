@@ -2,9 +2,9 @@
 package setutime
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -24,11 +24,11 @@ import (
 
 // Pools 图片缓冲池
 type imgpool struct {
-	db     *sql.Sqlite
+	db     sql.Sqlite
 	dbmu   sync.RWMutex
 	path   string
 	max    int
-	pool   map[string][]*message.MessageSegment
+	pool   map[string][]*message.Segment
 	poolmu sync.Mutex
 }
 
@@ -44,14 +44,13 @@ func (p *imgpool) List() (l []string) {
 }
 
 var pool = &imgpool{
-	db:   &sql.Sqlite{},
 	path: pixiv.CacheDir,
 	max:  10,
-	pool: make(map[string][]*message.MessageSegment),
+	pool: make(map[string][]*message.Segment),
 }
 
 func init() { // 插件主体
-	engine := control.Register("setutime", &ctrl.Options[*zero.Ctx]{
+	engine := control.AutoRegister(&ctrl.Options[*zero.Ctx]{
 		DisableOnDefault: false,
 		Brief:            "涩图",
 		Help: "- 来份[涩图/二次元/风景/车万]\n" +
@@ -63,9 +62,9 @@ func init() { // 插件主体
 
 	getdb := fcext.DoOnceOnSuccess(func(ctx *zero.Ctx) bool {
 		// 如果数据库不存在则下载
-		pool.db.DBPath = engine.DataFolder() + "SetuTime.db"
+		pool.db = sql.New(engine.DataFolder() + "SetuTime.db")
 		_, _ = engine.GetLazyData("SetuTime.db", false)
-		err := pool.db.Open(time.Hour * 24)
+		err := pool.db.Open(time.Hour)
 		if err != nil {
 			ctx.SendChain(message.Text("ERROR: ", err))
 			return false
@@ -154,34 +153,25 @@ func (p *imgpool) size(imgtype string) int {
 }
 
 func (p *imgpool) push(ctx *zero.Ctx, imgtype string, illust *pixiv.Illust) {
-	u := illust.ImageUrls[0]
-	n := u[strings.LastIndex(u, "/")+1 : len(u)-4]
-	m, err := imagepool.GetImage(n)
-	var msg message.MessageSegment
+	if len(illust.ImageUrls) == 0 {
+		return
+	}
+	var msg message.Segment
 	f := fileutil.BOTPATH + "/" + illust.Path(0)
-	if err != nil {
-		if fileutil.IsNotExist(f) {
-			// 下载图片
-			if err := illust.DownloadToCache(0); err != nil {
-				ctx.SendChain(message.Text("ERROR: ", err))
-				return
-			}
-		}
-		m.SetFile(f)
-		_, _ = m.Push(ctxext.SendToSelf(ctx), ctxext.GetMessage(ctx))
-		msg = message.Image("file:///" + f)
-	} else {
-		msg = message.Image(m.String())
-		if ctxext.SendToSelf(ctx)(msg) == 0 {
-			msg = msg.Add("cache", "0")
+	if fileutil.IsNotExist(f) {
+		// 下载图片
+		if err := illust.DownloadToCache(0); err != nil {
+			ctx.SendChain(message.Text("ERROR: ", err))
+			return
 		}
 	}
+	msg = message.Image("file:///" + f)
 	p.poolmu.Lock()
 	p.pool[imgtype] = append(p.pool[imgtype], &msg)
 	p.poolmu.Unlock()
 }
 
-func (p *imgpool) pop(imgtype string) (msg *message.MessageSegment) {
+func (p *imgpool) pop(imgtype string) (msg *message.Segment) {
 	p.poolmu.Lock()
 	defer p.poolmu.Unlock()
 	if p.size(imgtype) == 0 {
@@ -222,21 +212,21 @@ func (p *imgpool) add(ctx *zero.Ctx, imgtype string, id int64) error {
 	if err != nil {
 		return err
 	}
-	err = imagepool.SendImageFromPool(strconv.FormatInt(illust.Pid, 10)+"_p0", illust.Path(0), func() error {
+	if len(illust.ImageUrls) == 0 {
+		return errors.New("nil image url")
+	}
+	err = imagepool.SendImageFromPool(illust.Path(0), func(string) error {
 		return illust.DownloadToCache(0)
-	}, ctxext.Send(ctx), ctxext.GetMessage(ctx))
+	}, ctxext.Send(ctx))
 	if err != nil {
 		return err
 	}
 	// 添加插画到对应的数据库table
-	if err := p.db.Insert(imgtype, illust); err != nil {
-		return err
-	}
-	return nil
+	return p.db.Insert(imgtype, illust)
 }
 
 func (p *imgpool) remove(imgtype string, id int64) error {
 	p.dbmu.Lock()
 	defer p.dbmu.Unlock()
-	return p.db.Del(imgtype, fmt.Sprintf("WHERE pid=%d", id))
+	return p.db.Del(imgtype, "WHERE pid = ?", id)
 }

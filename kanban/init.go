@@ -2,11 +2,43 @@
 package kanban
 
 import (
-	"sync"
+	"fmt"
+
+	"github.com/FloatTech/zbputils/control"
+	"github.com/fumiama/go-registry"
+
+	"github.com/FloatTech/ZeroBot-Plugin/kanban/banner"
 )
 
-var once sync.Once
+//go:generate go run github.com/FloatTech/ZeroBot-Plugin/kanban/gen
 
 func init() {
-	once.Do(PrintBanner)
+	PrintBanner()
+}
+
+var reg = registry.NewRegReader("reilia.fumiama.top:32664", control.Md5File, "fumiama")
+
+// PrintBanner ...
+func PrintBanner() {
+	fmt.Print(
+		"\n======================[ZeroBot-Plugin]======================",
+		"\n", banner.Banner, "\n",
+		"----------------------[ZeroBot-公告栏]----------------------",
+		"\n", Kanban(), "\n",
+		"============================================================\n\n",
+	)
+}
+
+// Kanban ...
+func Kanban() string {
+	err := reg.Connect()
+	if err != nil {
+		return err.Error()
+	}
+	defer reg.Close()
+	text, err := reg.Get("ZeroBot-Plugin/kanban")
+	if err != nil {
+		return err.Error()
+	}
+	return text
 }
